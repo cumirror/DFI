@@ -62,18 +62,23 @@ static void AC_FREE (void *p)
 typedef struct _queue
 {
 	int num;
-	int newNum;
-	ushort entity[0];
+	int nodeSize;
+	char acsmStateTable[0];
 }QUEUE;
 
 /*
 *Init the Queue
 */ 
-static void queue_init (QUEUE ** s, int num) 
+static void queue_init (QUEUE ** s, int num, int nodeSize) 
 {
-	*s = (QUEUE*)AC_MALLOC(sizeof(QUEUE) + sizeof(ushort)*num);
+	*s = (QUEUE*)AC_MALLOC(sizeof(QUEUE) + nodeSize*num);
 	(*s)->num = 0;
-	(*s)->newNum = 0;
+	(*s)->nodeSize = nodeSize;
+}
+
+static void queue_destroy (QUEUE* s) 
+{
+	AC_FREE(s);
 }
 
 static int queue_num (QUEUE * s) 
@@ -81,37 +86,72 @@ static int queue_num (QUEUE * s)
 	return s->num;
 }
 
-static int queue_elem (QUEUE * s, int index) 
+static ACSM_STATETABLE* queue_elem (QUEUE * s, int index) 
 {
-	return s->entity[index];
+	return (ACSM_STATETABLE*)(s->acsmStateTable + s->nodeSize*index);
 }
 
 /*
 *  Add Tail Item to queue
 */ 
-static void queue_add (QUEUE * s, ushort state) 
+static void queue_add (QUEUE * s, ACSM_STATETABLE* state) 
 {
-	s->entity[s->num + s->newNum] = state;
-	s->newNum += 1;
+	memcpy(s->acsmStateTable + s->nodeSize*s->num, state, s->nodeSize);
+	s->num += 1;
 }
 
-static void queue_addFin (QUEUE * s) 
-{
-	s->num += s->newNum;
-	s->newNum = 0;
-}
+
+#define MAX_SCAN_PACKETS 20
+#define MAX_NFA_STATE (MAX_SCAN_PACKETS+1)
 
 /*
-static char empty (STACK * s)
+*    Simple STACK NODE
+*/ 
+typedef struct _stack
 {
-	return (char)(s->top < 0);
+	int top;
+	int maxNum;
+	uint entity[0];
+}STACK;
+
+/*
+*Init the STACK
+*/ 
+static void stack_init (STACK ** s) 
+{
+	*s = (STACK*)AC_MALLOC(sizeof(STACK) + sizeof(uint)*MAX_NFA_STATE);
+	(*s)->top = 0;
+	(*s)->maxNum = MAX_NFA_STATE;
 }
 
-static void clear (STACK * s)
+static uint stack_pop (STACK * s)
+{
+	assert(s->top > 0);
+
+	return s->entity[--s->top];
+}
+
+static void stack_push (STACK * s, uint index)
+{
+	assert(s->top < s->maxNum);
+	s->entity[s->top++] = index;
+}
+
+static void stack_destroy (STACK* s) 
+{
+	AC_FREE(s);
+}
+
+static char stack_empty (STACK * s)
+{
+	return (char)(s->top == 0);
+}
+
+static void stack_clear (STACK * s)
 {
 	s->top = 0;
 }
-*/
+
 void patternDump(ACSM_PATTERN * pattern)
 {
 	ACSM_PATTERN * mlist = pattern;
@@ -147,11 +187,12 @@ void stateTableDump(ACSM_STATETABLE * stateTable, int num, int nextSize)
 	dfa = (ushort *)stateTable;
 	offset = sizeof(ACSM_STATETABLE)/sizeof(ushort);
 	dfa_offset = offset + nextSize;
-	
+
 	printf("StateTable info:\n");
 	for(i = 0; i < num; i++){
 		stateNode = (ACSM_STATETABLE *)dfa;
-		printf("\t state[%d], id %4d, flag %4d\n", i, stateNode->id, stateNode->flag);
+		printf("\t state[%d], id %4d, flag %4d, branchNum %4d\n",
+			i, stateNode->id, stateNode->flag, stateNode->branchNum);
 		printf("\t nextTable:\n");
 		nextTableDump(stateNode->NextState, nextSize);
 		dfa += dfa_offset;
@@ -181,6 +222,25 @@ void acsmDump (ACSM_STRUCT * acsm)
 	stateTableDump(acsm->acsmStateTable, acsm->acsmNumStates, acsm->acsmMapSize);
 }
 
+STACK *newStack, *oldStack;
+QUEUE *stateQue;
+void acsmAssistInit(ACSM_STRUCT * acsm)
+{
+	stack_init(&newStack);
+	stack_init(&oldStack);
+	queue_init (&stateQue, MAX_NFA_STATE, sizeof(ACSM_STATETABLE)+ acsm->acsmMapSize * sizeof(ushort));
+
+	MEMASSERT ((newStack!=NULL && oldStack!=NULL && stateQue!=NULL), "acsmAssistInit");
+}
+
+/* where should i call this? */
+void acsmAssistDestroy(ACSM_STRUCT * acsm)
+{
+	stack_destroy(oldStack);
+	stack_destroy(newStack);
+	queue_destroy(stateQue);
+}
+
 /*
 * Init the acsm DataStruct
 */ 
@@ -195,16 +255,17 @@ ACSM_STRUCT * acsmNew ()
 
 void acsmFree (ACSM_STRUCT * acsm) 
 {
-    	ACSM_PATTERN *acsmPatterns, *next;
+	ACSM_PATTERN *acsmPatterns, *next;
 
-	free(acsm->acsmStateTable);
-	free(acsm->acsmMapTable);
+	AC_FREE(acsm->acsmStateTable);
+	AC_FREE(acsm->acsmMapTable);
 	acsmPatterns = acsm->acsmPatterns;
 	while(acsmPatterns != NULL){
 		next = acsmPatterns->next;
-		free(acsmPatterns);
+		AC_FREE(acsmPatterns);
 		acsmPatterns = next;
 	}
+	acsmAssistDestroy(acsm);
 }
 
 /* 
@@ -236,22 +297,22 @@ static void AddPatternStates (ACSM_STRUCT * acsm, ACSM_PATTERN * p)
 		state = next;
 	}
 
- 	/* Add new states for the rest of the pattern*/ 
+	/* Add new states for the rest of the pattern*/ 
 	for (; n > 0; pattern++, n--){
 		index = bsearch(pattern, lenArray, size, sizeof(ushort), cmp);
 		assert(index != NULL);
 		acsm->acsmNumStates++;
 		stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
 		stateNode->NextState[index-lenArray] = acsm->acsmNumStates;
+		stateNode->branchNum += 1;
 		state = acsm->acsmNumStates;
 	}
 	/*set the flag of accept state*/
 	stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
 	stateNode->flag = 0xab;
 	stateNode->id = p->id;
+	stateNode->branchNum = 1;/*as a nomal state although it's accept state, it should be one*/
 }
-
-
 
 /*
 *   Add a pattern to the list of patterns for this state machine
@@ -280,7 +341,7 @@ int acsmCompile (ACSM_STRUCT * acsm)
 	ACSM_PATTERN * plist;
 	ushort* len_list;
 	int num, stateSize;
-	
+
 	/*sort the length and remove duplicate*/
 	len_list = (ushort *) AC_MALLOC (sizeof (ushort) * (acsm->acsmMaxStates));
 	MEMASSERT (len_list, "acsmCompile: mapTable");
@@ -296,7 +357,7 @@ int acsmCompile (ACSM_STRUCT * acsm)
 	/*the index in the array used for the state's next*/
 	acsm->acsmMapTable = len_list;
 	acsm->acsmMapSize = num;
-	
+
 	/*build the state table*/
 	acsm->acsmMaxStates += 1;	/*add state 0*/
 	assert(acsm->acsmMaxStates < 65535);
@@ -312,103 +373,103 @@ int acsmCompile (ACSM_STRUCT * acsm)
 	for (plist = acsm->acsmPatterns; plist != NULL; plist = plist->next){
 		AddPatternStates (acsm, plist);
 	}
-	
+
+	acsmAssistInit(acsm);
 	return 0;
 }
+
 
 /*
 *   Search Text or Binary Data for Pattern matches
 *   mod: 0--flexible; 1--strict
-*/ 
+*/
 int acsmSearch (ACSM_STRUCT * acsm, ushort *Tx, int n, int mod) 
 {
-	ushort state, st;
-	ushort *Tend, *T;
-	ushort* lenArray, *lenIndex; 
-	int size = acsm->acsmMapSize;
-	ushort* dfa;
-	int dfa_offset;
-	ACSM_STATETABLE * stateNode;
-
-	int i;
-	QUEUE *stateQue;
-	char* stateExist;
+	ushort st, *Tend, *T;
+	ushort *lenArray, *lenIndex; 
+	int mapSize, dfa_offset;
+	STACK *tmpStack;
+	ACSM_STATETABLE *currentNode, *nextNode;
+	int currentIndex, nextIndex;
+	ushort *dfa;
 
 	dfa = (ushort*)(acsm->acsmStateTable);
 	dfa_offset = sizeof(ACSM_STATETABLE)/sizeof(ushort) + acsm->acsmMapSize;
 	lenArray = acsm->acsmMapTable;
+	mapSize = acsm->acsmMapSize;
 
-	Tend = Tx + n;
-	T = Tx;
-	state = st = 0;
-	stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
+	stack_clear(newStack);
+	stack_clear(oldStack);
 
-	
-	queue_init(&stateQue, acsm->acsmNumStates + 1);
+	/*add state 0*/
+	currentIndex = 0;
+	currentNode = (ACSM_STATETABLE * )(dfa+dfa_offset);
+	if(currentNode->branchNum > 1){	
+		currentIndex |= 0x10000;
+		currentIndex |= queue_num(stateQue);
+		stack_push(oldStack, currentIndex);
+		queue_add(stateQue, currentNode);
+	} else {
+		stack_push(oldStack, currentIndex);
+	}
 
-	stateExist = (char*)AC_MALLOC(sizeof(char)*(acsm->acsmNumStates + 1));
-	memset(stateExist, 0, sizeof(char)*(acsm->acsmNumStates + 1));
-
-	queue_add(stateQue, 0);
-	queue_addFin(stateQue);
-
-#if 1
-	for (; T < Tend; T++) {
-		lenIndex = bsearch(T, lenArray, size, sizeof(ushort), cmp);
+	for (Tend = Tx + n, T = Tx; T < Tend; T++) {
+		lenIndex = bsearch(T, lenArray, mapSize, sizeof(ushort), cmp);
 		if(lenIndex == NULL)
 			continue;
 
-		/*还能优化，只保存有分支的节点*/
-		for(i = 0; i < queue_num(stateQue); i++){
+		while(!stack_empty(oldStack)){
+			currentIndex = stack_pop(oldStack);
+			nextIndex = 0;
+			if(currentIndex & 0x10000){
+				currentNode = queue_elem(stateQue, currentIndex&0xFFFF);
+			} else {
+				currentNode = (ACSM_STATETABLE*)(dfa + (currentIndex&0xFFFF)*dfa_offset);
+			}
+			st = currentNode->NextState[lenIndex-lenArray];
 
-			state = queue_elem(stateQue, i);
-			stateNode = (ACSM_STATETABLE *)(dfa+state*dfa_offset);
-			st = stateNode->NextState[lenIndex-lenArray];
-
-			if(st != 0 && !stateExist[st]){
-				queue_add(stateQue, st);
-				stateExist[st] = true;
-			}				
+			if(st != 0 ){
+				if(currentIndex & 0x10000 && currentNode->branchNum > 1){
+					stack_push(newStack, currentIndex);
+					/*avoid recored no jump branch*/
+					currentNode->branchNum -= 1;
+					/*avoid state jump at this length again*/
+					currentNode->NextState[lenIndex-lenArray] = 0;
+				}
+				nextNode = (ACSM_STATETABLE*)(dfa + st*dfa_offset);
+				if(nextNode->branchNum > 1){	
+					nextIndex |= 0x10000;
+					nextIndex |= queue_num(stateQue);
+					stack_push(newStack, nextIndex);
+					queue_add(stateQue, nextNode);
+				} else {
+					nextIndex = st;
+					stack_push(newStack, nextIndex);
+				}				
+			} else {
+				/*jump failed, keep record orignal state*/
+				stack_push(newStack, currentIndex);
+			}
 		}
-		queue_addFin(stateQue);
+
+		tmpStack = newStack;
+		newStack = oldStack;
+		oldStack = tmpStack;
+		stack_clear(newStack);
 	}
 
-	for(i = 0; i < queue_num(stateQue); i++){
-		state = queue_elem(stateQue, i);
-		stateNode = (ACSM_STATETABLE *)(dfa+state*dfa_offset);
-
-		if(stateNode->flag == 0xab){
-			printf("Matched %d\n", stateNode->id);
+	/*output the result*/
+	while(!stack_empty(oldStack)){
+		currentIndex = stack_pop(oldStack);
+		if(currentIndex & 0x10000){
+			currentNode = queue_elem(stateQue, currentIndex&0xFFFF);
+		} else {
+			currentNode = (ACSM_STATETABLE*)(dfa + (currentIndex&0xFFFF)*dfa_offset);
+		}
+		if(currentNode->flag == 0xab){
+			printf("Matched %d\n", currentNode->id);
 		}
 	}
 	return 0;
 
-#else
-	
-	for (state = 0; T < Tend; T++) {
-		lenIndex = bsearch(T, lenArray, size, sizeof(ushort), cmp);
-		if(lenIndex == NULL)
-			continue;
-
-		stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
-		st = stateNode->NextState[lenIndex-lenArray];
-
-		if(st == 0){
-			if(mod)
-				break;
-			else 
-				continue;
-		} else { 
-			state = st;
-		}
-		
-		stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
-		// State is a accept state? 
-		if( stateNode->flag == 0xab ) {
-			break;
-		}
-	}
-	return stateNode->id;
-
-#endif	
 }

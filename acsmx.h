@@ -34,7 +34,7 @@ typedef struct _acsm_pattern {
 typedef struct  {
  	uint id;				/* the appid */
  	uint flag;				/* if it's a accept state, flag = 1 */
-	uint FailState;
+	uint branchNum;
 	/*ushort(65535 is enough for state num)*/
  	ushort NextState[0];	/* the size of nextstate table is decided by num of len_list */
 }ACSM_STATETABLE; 
