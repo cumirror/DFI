@@ -3,33 +3,34 @@
 **
 **
 */
-#ifndef ACSMX_H
-#define ACSMX_H
+#ifndef ACSMX_DFI_H
+#define ACSMX_DFI_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "comm.h"
 
-typedef unsigned short ushort;
-typedef unsigned int uint;
-typedef unsigned char uchar;
-
-#define true 1
-#define false 0
-
+#define ACSM_FAIL_STATE  0     
+#define DFI_SCAN_NUM_PER_ORDER 10
+/*
+ * actually payload don't include the tcp/udp head
+ * the length should be 1500 - 20 - [20|8] 
+ * */
+#define MAX_PAYLOAD_LENGTH 1501
+#define MAX_MATCHED_NUM 8
 /*
 *   Prototypes
 */
-
-#define ACSM_FAIL_STATE  0     
-
 typedef struct _acsm_pattern {
-    struct  _acsm_pattern *next;
-    uint 	id;
-    uint	num;
-    ushort	patrn[0];
+    ushort	num;
+    ushort	patrn[DFI_SCAN_NUM_PER_ORDER*2];
 } ACSM_PATTERN;
 
+typedef struct {
+    ushort matchNum;
+    ushort combineNum;
+    ushort* indexArray;  
+    ushort* areaNum;  
+    ushort* patterns;
+}PATTERN_STRUCT;
 
 typedef struct  {
  	uint id;				/* the appid */
@@ -45,20 +46,49 @@ typedef struct  {
 typedef struct {
     ushort acsmMaxStates;  
     ushort acsmNumStates;  
-    int acsmMapSize;
+    ushort acsmPatternNum;  
+    ushort acsmMapSize;
     ushort* acsmMapTable;
-    ACSM_PATTERN    *acsmPatterns;
     ACSM_STATETABLE *acsmStateTable;
 }ACSM_STRUCT;
 
 /*
 *   Prototypes
 */
-ACSM_STRUCT * acsmNew ();
-int acsmAddPattern( ACSM_STRUCT* p, uint id, ushort* pat, uint n);
-int acsmCompile ( ACSM_STRUCT* acsm );
-int acsmSearch ( ACSM_STRUCT* acsm, ushort* T, int n, int mod);
-void acsmFree ( ACSM_STRUCT* acsm );
-void acsmDump ( ACSM_STRUCT* acsm );
+extern ACSM_STRUCT * acmTCPTree;
+extern ACSM_STRUCT * acmUDPTree;
+ushort acsmRangeMap(ushort len);
+int acsmCompile(ACSM_STRUCT* acsmTree, PATTERN_STRUCT* patterns, int n);
+int acsm_init();
+int acsmSearch (ACSM_STRUCT* acsmTree, ushort *Tx, int n, ushort matched_index[], ushort max_matched_num); 
+void acsmFree ();
+void acsmTreeFree (ACSM_STRUCT * acsmTree);
+void acsmDump (ACSM_STRUCT* acsmTree);
+void acsmAssistInit();
+void acsmAssistDestroy();
+	
+/*
+*    Simple STACK NODE
+*/ 
+typedef struct _stack
+{
+	int top;
+	int maxNum;
+	uint entity[0];
+}STACK;
 
+/*
+*    Simple QUEUE NODE
+*/ 
+typedef struct _queue
+{
+	int num;
+	int maxNum;
+	int nodeSize;
+	char acsmStateTable[0];
+}QUEUE;
+
+extern QUEUE *stateQue;
+extern STACK *newStack;
+extern STACK *oldStack;
 #endif

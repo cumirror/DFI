@@ -2,9 +2,9 @@
 **
 ** Multi-Pattern Search Engine
 **
-** Aho-Corasick State Machine -  uses a Deterministic Finite Automata - DFA
+** use NFA for DFI
 **              
-**  tongjin : modify it for DFI
+** tongjin
 **	
 */  
 
@@ -14,8 +14,9 @@
 #include <ctype.h>
 #include <assert.h>
 #include "acsmx.h"
-
-#define MEMASSERT(p,s) if(!p){fprintf(stderr,"ACSM-No Memory: %s!\n",s);exit(0);}
+#include "partition.h"
+//#include "common/acsmx.h"
+//#include "slub.h"
 
 int rm_dup(ushort* array, ushort num)
 {
@@ -37,48 +38,59 @@ int cmp ( const void *a , const void *b )
 }
 
 /*
-* Malloc the AC Memory
-*/ 
-static void *AC_MALLOC (int n) 
-{
-	void *p;
-	p = malloc (n);
+ * as pattern was discribed as a range array, and a range maybe split to some little areas, 
+ * so we need combine different areas, and output all the possible combinations as the real pattern! 
+ */
+void getPatterns(ushort* arrays, ushort* num, ushort count, ushort* patterns){
+	int a, i, j, k, x, y, z, offset;
+	int size = 1; 
+	ushort *data, *array_data;
+	for(a = 0; a < count; a++){
+		size *= num[a];
+	}
+	x = 1;
+	z = size;
+	data = patterns;
+	array_data = arrays;
 
-	return p;
+	for(a = 0; a < count; a++){
+		z /= num[a];
+		offset = 0;
+
+		for(i = 0; i < x; i++){
+			for(j = 0, y = num[a]; j < y; j++){
+				for(k = 0; k < z; k++){
+					data[offset+a] = array_data[j];
+					offset += count;
+				}
+			}
+		}
+		x *= num[a];
+		array_data += num[a];
+	}
 }
-
-/*
-*Free the AC Memory
-*/ 
-static void AC_FREE (void *p) 
-{
-	if (p)
-		free (p);
-}
-
-/*
-*    Simple QUEUE NODE
-*/ 
-typedef struct _queue
-{
-	int num;
-	int nodeSize;
-	char acsmStateTable[0];
-}QUEUE;
 
 /*
 *Init the Queue
 */ 
 static void queue_init (QUEUE ** s, int num, int nodeSize) 
 {
-	*s = (QUEUE*)AC_MALLOC(sizeof(QUEUE) + nodeSize*num);
-	(*s)->num = 0;
-	(*s)->nodeSize = nodeSize;
+	*s = (QUEUE*)kmalloc(sizeof(QUEUE) + nodeSize*num, MOD_DFI);
+	if(*s){
+		(*s)->num = 0;
+		(*s)->maxNum = num;
+		(*s)->nodeSize = nodeSize;
+	}
 }
 
 static void queue_destroy (QUEUE* s) 
 {
-	AC_FREE(s);
+	if(s) kfree(s);
+}
+
+static int queue_clear (QUEUE * s) 
+{
+	return s->num = 0;
 }
 
 static int queue_num (QUEUE * s) 
@@ -96,50 +108,41 @@ static ACSM_STATETABLE* queue_elem (QUEUE * s, int index)
 */ 
 static void queue_add (QUEUE * s, ACSM_STATETABLE* state) 
 {
+	if(s->num == s->maxNum)
+		return;
 	memcpy(s->acsmStateTable + s->nodeSize*s->num, state, s->nodeSize);
 	s->num += 1;
 }
 
-
-#define MAX_SCAN_PACKETS 20
-#define MAX_NFA_STATE (MAX_SCAN_PACKETS+1)
-
-/*
-*    Simple STACK NODE
-*/ 
-typedef struct _stack
-{
-	int top;
-	int maxNum;
-	uint entity[0];
-}STACK;
-
 /*
 *Init the STACK
 */ 
-static void stack_init (STACK ** s) 
+static void stack_init (STACK ** s, int num) 
 {
-	*s = (STACK*)AC_MALLOC(sizeof(STACK) + sizeof(uint)*MAX_NFA_STATE);
-	(*s)->top = 0;
-	(*s)->maxNum = MAX_NFA_STATE;
+	*s = (STACK*)kmalloc(sizeof(STACK) + sizeof(uint)*num, MOD_DFI);
+	if(*s) {	
+		(*s)->top = 0;
+		(*s)->maxNum = num;
+	}
 }
 
 static uint stack_pop (STACK * s)
 {
 	assert(s->top > 0);
-
 	return s->entity[--s->top];
 }
 
 static void stack_push (STACK * s, uint index)
 {
 	assert(s->top < s->maxNum);
+	if(s->top == s->maxNum)
+		return;
 	s->entity[s->top++] = index;
 }
 
 static void stack_destroy (STACK* s) 
 {
-	AC_FREE(s);
+	if(s) kfree(s);
 }
 
 static char stack_empty (STACK * s)
@@ -150,21 +153,6 @@ static char stack_empty (STACK * s)
 static void stack_clear (STACK * s)
 {
 	s->top = 0;
-}
-
-void patternDump(ACSM_PATTERN * pattern)
-{
-	ACSM_PATTERN * mlist = pattern;
-	uint i;
-
-	printf("Patterns info:\n");
-	for (;mlist!=NULL;mlist=mlist->next){
-		printf("\t Pattern info:\n");
-		for(i = 0; i < mlist->num; i++){
-			printf("%4d  ", mlist->patrn[i]);
-		}
-		printf("\n");  
-	}
 }
 
 void nextTableDump(ushort * nextTable, int nextSize)
@@ -210,73 +198,93 @@ void mapTableDump(ushort * a, uint num)
 	printf("\n");
 }
 
-void acsmDump (ACSM_STRUCT * acsm)
+void acsmDump (ACSM_STRUCT* acsmTree)
 {
-	patternDump(acsm->acsmPatterns);
-
+	if(!acsmTree)
+		return;
 	printf("ACSM info:\n");
-	printf("\t acsmMaxStates: %d\n",   acsm->acsmMaxStates);
-	printf("\t acsmNumStates: %d\n",   acsm->acsmNumStates);
+	printf("\t acsmMaxStates: %d\n",   acsmTree->acsmMaxStates);
+	printf("\t acsmNumStates: %d\n",   acsmTree->acsmNumStates);
 
-	mapTableDump(acsm->acsmMapTable, acsm->acsmMapSize);
-	stateTableDump(acsm->acsmStateTable, acsm->acsmNumStates, acsm->acsmMapSize);
+//	mapTableDump(acsmTree->acsmMapTable, MAX_PAYLOAD_LENGTH);
+	stateTableDump(acsmTree->acsmStateTable, acsmTree->acsmNumStates, acsmTree->acsmMapSize);
 }
 
-STACK *newStack, *oldStack;
-QUEUE *stateQue;
-void acsmAssistInit(ACSM_STRUCT * acsm)
+ACSM_STRUCT * acmTCPTree = NULL;
+ACSM_STRUCT * acmUDPTree = NULL;
+STACK *newStack = NULL;
+STACK *oldStack = NULL;
+QUEUE *stateQue = NULL;
+
+void acsmAssistInit()
 {
-	stack_init(&newStack);
-	stack_init(&oldStack);
-	queue_init (&stateQue, MAX_NFA_STATE, sizeof(ACSM_STATETABLE)+ acsm->acsmMapSize * sizeof(ushort));
+	int maxStateNum, maxMapSize;
+	maxStateNum = maxMapSize = 0;
+	if(!acmTCPTree && !acmUDPTree){
+		printf("error, acsm Tree build failed!\n");
+		return;
+	}
+	if(acmTCPTree){
+		maxStateNum =  acmTCPTree->acsmPatternNum;
+		maxMapSize =  acmTCPTree->acsmMapSize;
+	}
+	if(acmUDPTree){
+		maxStateNum =  acmUDPTree->acsmPatternNum > maxStateNum ?
+			acmUDPTree->acsmPatternNum : maxStateNum;
+		maxMapSize =  acmUDPTree->acsmMapSize > maxMapSize ? 
+			acmUDPTree->acsmMapSize : maxMapSize;
+	}
 
-	MEMASSERT ((newStack!=NULL && oldStack!=NULL && stateQue!=NULL), "acsmAssistInit");
+	stack_init(&newStack, maxStateNum);
+	stack_init(&oldStack, maxStateNum);
+	queue_init(&stateQue, maxStateNum, sizeof(ACSM_STATETABLE)+ maxMapSize * sizeof(ushort));
+
+	assert(newStack != NULL && oldStack != NULL && stateQue != NULL);
+	if(newStack == NULL || oldStack == NULL || stateQue == NULL){
+		printf("acsmAssistInit failed\n");
+	}
 }
 
-/* where should i call this? */
-void acsmAssistDestroy(ACSM_STRUCT * acsm)
+void acsmAssistDestroy()
 {
 	stack_destroy(oldStack);
 	stack_destroy(newStack);
 	queue_destroy(stateQue);
+	newStack = oldStack = NULL;
+	stateQue = NULL;
 }
 
-/*
-* Init the acsm DataStruct
-*/ 
-ACSM_STRUCT * acsmNew () 
+void acsmTreeFree (ACSM_STRUCT* acsmTree) 
 {
-	ACSM_STRUCT * p;
-	p = (ACSM_STRUCT *) AC_MALLOC (sizeof (ACSM_STRUCT));
-	MEMASSERT (p, "acsmNew");
-	if (p) memset (p, 0, sizeof (ACSM_STRUCT));
-	return p;
-}
-
-void acsmFree (ACSM_STRUCT * acsm) 
-{
-	ACSM_PATTERN *acsmPatterns, *next;
-
-	AC_FREE(acsm->acsmStateTable);
-	AC_FREE(acsm->acsmMapTable);
-	acsmPatterns = acsm->acsmPatterns;
-	while(acsmPatterns != NULL){
-		next = acsmPatterns->next;
-		AC_FREE(acsmPatterns);
-		acsmPatterns = next;
+	if(!acsmTree)return;	
+	
+	if(acsmTree->acsmMapTable != NULL){
+		kfree(acsmTree->acsmMapTable);
+		acsmTree->acsmMapTable = NULL;
 	}
-	acsmAssistDestroy(acsm);
+	
+	if(acsmTree->acsmStateTable != NULL){
+		kfree(acsmTree->acsmStateTable);
+		acsmTree->acsmStateTable = NULL;
+	}
+	kfree(acsmTree);
+}
+
+void acsmFree() 
+{
+	acsmTreeFree(acmTCPTree); 
+	acsmTreeFree(acmUDPTree); 
+	acmTCPTree = NULL;
+	acmUDPTree = NULL;
 }
 
 /* 
-* Add Pattern States
-*/ 
-static void AddPatternStates (ACSM_STRUCT * acsm, ACSM_PATTERN * p) 
+ * Add Pattern States
+ */ 
+static void AddPatternStates (ACSM_STRUCT * acsm, ushort* patrn, int num, int id) 
 {
 	ushort *pattern;
-	ushort *index, *lenArray;
 	int state=0, next, n;
-	int size;
 	ushort* dfa = NULL;
 	int dfa_offset;
 	ACSM_STATETABLE * stateNode;
@@ -284,14 +292,11 @@ static void AddPatternStates (ACSM_STRUCT * acsm, ACSM_PATTERN * p)
 	dfa = (ushort*)(acsm->acsmStateTable);
 	dfa_offset = sizeof(ACSM_STATETABLE)/sizeof(ushort) + acsm->acsmMapSize;
 
-	lenArray = acsm->acsmMapTable;
-	size = acsm->acsmMapSize;
 	/*Match up pattern with existing states*/
-	for (n = p->num, pattern = p->patrn; n > 0; pattern++, n--){
-		index = bsearch(pattern, lenArray, size, sizeof(ushort), cmp);
-		assert(index != NULL);
+	for (n = num, pattern = patrn; n > 0; pattern++, n--){
+		assert(*pattern != 0);
 		stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
-		next = stateNode->NextState[index-lenArray];
+		next = stateNode->NextState[*pattern];
 		if (next == ACSM_FAIL_STATE)
 			break;
 		state = next;
@@ -299,111 +304,86 @@ static void AddPatternStates (ACSM_STRUCT * acsm, ACSM_PATTERN * p)
 
 	/* Add new states for the rest of the pattern*/ 
 	for (; n > 0; pattern++, n--){
-		index = bsearch(pattern, lenArray, size, sizeof(ushort), cmp);
-		assert(index != NULL);
+		assert(*pattern != 0);
 		acsm->acsmNumStates++;
 		stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
-		stateNode->NextState[index-lenArray] = acsm->acsmNumStates;
+		stateNode->NextState[*pattern] = acsm->acsmNumStates;
 		stateNode->branchNum += 1;
 		state = acsm->acsmNumStates;
 	}
+
 	/*set the flag of accept state*/
+	if(stateNode->flag == 0xab){
+		printf("warning: appid:%4d's pattern is the same with appid:%4d\n",
+				stateNode->id, id);
+	}
 	stateNode = (ACSM_STATETABLE * )(dfa+state*dfa_offset);
 	stateNode->flag = 0xab;
-	stateNode->id = p->id;
-	stateNode->branchNum = 1;/*as a nomal state although it's accept state, it should be one*/
-}
-
-/*
-*   Add a pattern to the list of patterns for this state machine
-*/ 
-int acsmAddPattern (ACSM_STRUCT * p, uint id, ushort *pat, uint n) 
-{
-	ACSM_PATTERN * plist;
-	plist = (ACSM_PATTERN *) AC_MALLOC (sizeof (ACSM_PATTERN) + sizeof(ushort) * n);
-	MEMASSERT (plist, "acsmAddPattern");
-	memcpy (plist->patrn, pat, sizeof(ushort)*n);
-	plist->num = n;
-	plist->id = id;
-
-	/*Add the pattern into the pattern list, insert from head*/
-	plist->next = p->acsmPatterns;
-	p->acsmPatterns = plist;
-	p->acsmMaxStates += n;
-	return 0;
+	stateNode->id = id;
+	stateNode->branchNum += 1;
 }
 
 /*
 *   Compile State Machine
 */ 
-int acsmCompile (ACSM_STRUCT * acsm) 
+int acsmCompile(ACSM_STRUCT* acsmTree, PATTERN_STRUCT* patterns, int n) 
 {
-	ACSM_PATTERN * plist;
-	ushort* len_list;
-	int num, stateSize;
-
-	/*sort the length and remove duplicate*/
-	len_list = (ushort *) AC_MALLOC (sizeof (ushort) * (acsm->acsmMaxStates));
-	MEMASSERT (len_list, "acsmCompile: mapTable");
-	for (num = 0, plist = acsm->acsmPatterns; plist != NULL; plist = plist->next){
-		memcpy (len_list+num, plist->patrn, sizeof(ushort)*(plist->num));
-		num += plist->num;
-	}
-	assert(num == acsm->acsmMaxStates);
-	qsort(len_list, acsm->acsmMaxStates, sizeof(ushort), cmp);
-	num = rm_dup(len_list, acsm->acsmMaxStates);
-
-	/*we can use the len_list as the mapping table*/
-	/*the index in the array used for the state's next*/
-	acsm->acsmMapTable = len_list;
-	acsm->acsmMapSize = num;
+	PATTERN_STRUCT* p;
+	ushort* pattern;
+	int num, stateSize, i, j;
 
 	/*build the state table*/
-	acsm->acsmMaxStates += 1;	/*add state 0*/
-	assert(acsm->acsmMaxStates < 65535);
-	stateSize = sizeof(ACSM_STATETABLE) + num*sizeof(ushort);
-	acsm->acsmStateTable = (ACSM_STATETABLE *) AC_MALLOC (stateSize*(acsm->acsmMaxStates));
-	MEMASSERT (acsm->acsmStateTable, "acsmCompile: stateTable");
-	memset (acsm->acsmStateTable, 0, stateSize*(acsm->acsmMaxStates));
-
-	/* Initialize state zero as a branch */
-	acsm->acsmNumStates = 0;
-
-	/* Add each Pattern to the State Table */ 
-	for (plist = acsm->acsmPatterns; plist != NULL; plist = plist->next){
-		AddPatternStates (acsm, plist);
+	acsmTree->acsmMaxStates += 1;	/*add state 0*/
+	stateSize = sizeof(ACSM_STATETABLE) + (acsmTree->acsmMapSize)*sizeof(ushort);
+	acsmTree->acsmStateTable = (ACSM_STATETABLE *)
+		kzalloc(stateSize * (acsmTree->acsmMaxStates), MOD_DFI);
+	if(!acsmTree->acsmStateTable){
+		printf("allocate stateTable error!\n");
+		return 1;
 	}
 
-	acsmAssistInit(acsm);
+	/* Initialize state zero as a branch */
+	acsmTree->acsmNumStates = 0;
+
+	/* Add each Pattern to the State Table */
+	for(i = 0, p = patterns; i < n; i++, p++){
+		for(j = 0, num = p->combineNum, pattern = p->patterns; j < num; j++){
+			AddPatternStates(acsmTree, pattern, p->matchNum, i);
+			pattern += p->matchNum;
+		}
+	}
+
 	return 0;
 }
 
-
 /*
-*   Search Text or Binary Data for Pattern matches
-*   mod: 0--flexible; 1--strict
-*/
-int acsmSearch (ACSM_STRUCT * acsm, ushort *Tx, int n, int mod) 
-{
+ *   Search packet length!
+ */
+int acsmSearch(ACSM_STRUCT* acsmTree, ushort *Tx, int n, ushort matched_index[], ushort max_matched_num) {
 	ushort st, *Tend, *T;
-	ushort *lenArray, *lenIndex; 
+	ushort *mapTable, index; 
 	int mapSize, dfa_offset;
 	STACK *tmpStack;
 	ACSM_STATETABLE *currentNode, *nextNode;
 	int currentIndex, nextIndex;
 	ushort *dfa;
+	int nmatched = 0;
 
-	dfa = (ushort*)(acsm->acsmStateTable);
-	dfa_offset = sizeof(ACSM_STATETABLE)/sizeof(ushort) + acsm->acsmMapSize;
-	lenArray = acsm->acsmMapTable;
-	mapSize = acsm->acsmMapSize;
+	if(!acsmTree){
+		return nmatched;
+	}
+	dfa = (ushort*)(acsmTree->acsmStateTable);
+	dfa_offset = sizeof(ACSM_STATETABLE)/sizeof(ushort) + acsmTree->acsmMapSize;
+	mapTable = acsmTree->acsmMapTable;
+	mapSize = acsmTree->acsmMapSize;
 
 	stack_clear(newStack);
 	stack_clear(oldStack);
-
+	queue_clear(stateQue); 
+	
 	/*add state 0*/
 	currentIndex = 0;
-	currentNode = (ACSM_STATETABLE * )(dfa+dfa_offset);
+	currentNode = (ACSM_STATETABLE * )dfa;
 	if(currentNode->branchNum > 1){	
 		currentIndex |= 0x10000;
 		currentIndex |= queue_num(stateQue);
@@ -414,8 +394,10 @@ int acsmSearch (ACSM_STRUCT * acsm, ushort *Tx, int n, int mod)
 	}
 
 	for (Tend = Tx + n, T = Tx; T < Tend; T++) {
-		lenIndex = bsearch(T, lenArray, mapSize, sizeof(ushort), cmp);
-		if(lenIndex == NULL)
+		assert(*T <= 1500);
+		if(*T > 1500) continue;
+		index = mapTable[*T];
+		if(index == 0)
 			continue;
 
 		while(!stack_empty(oldStack)){
@@ -426,7 +408,7 @@ int acsmSearch (ACSM_STRUCT * acsm, ushort *Tx, int n, int mod)
 			} else {
 				currentNode = (ACSM_STATETABLE*)(dfa + (currentIndex&0xFFFF)*dfa_offset);
 			}
-			st = currentNode->NextState[lenIndex-lenArray];
+			st = currentNode->NextState[index];
 
 			if(st != 0 ){
 				if(currentIndex & 0x10000 && currentNode->branchNum > 1){
@@ -434,7 +416,7 @@ int acsmSearch (ACSM_STRUCT * acsm, ushort *Tx, int n, int mod)
 					/*avoid recored no jump branch*/
 					currentNode->branchNum -= 1;
 					/*avoid state jump at this length again*/
-					currentNode->NextState[lenIndex-lenArray] = 0;
+					currentNode->NextState[index] = 0;
 				}
 				nextNode = (ACSM_STATETABLE*)(dfa + st*dfa_offset);
 				if(nextNode->branchNum > 1){	
@@ -446,6 +428,14 @@ int acsmSearch (ACSM_STRUCT * acsm, ushort *Tx, int n, int mod)
 					nextIndex = st;
 					stack_push(newStack, nextIndex);
 				}				
+
+				/*record the accept node*/
+				if(nextNode->flag == 0xab){
+					matched_index[nmatched] = nextNode->id;
+					nmatched++;
+					if (nmatched == max_matched_num)
+						goto ret;
+				}
 			} else {
 				/*jump failed, keep record orignal state*/
 				stack_push(newStack, currentIndex);
@@ -458,18 +448,186 @@ int acsmSearch (ACSM_STRUCT * acsm, ushort *Tx, int n, int mod)
 		stack_clear(newStack);
 	}
 
-	/*output the result*/
-	while(!stack_empty(oldStack)){
-		currentIndex = stack_pop(oldStack);
-		if(currentIndex & 0x10000){
-			currentNode = queue_elem(stateQue, currentIndex&0xFFFF);
-		} else {
-			currentNode = (ACSM_STATETABLE*)(dfa + (currentIndex&0xFFFF)*dfa_offset);
+ret:
+	return nmatched;
+}
+
+void dfiSearch()
+{
+	unsigned short lenArray1[DFI_SCAN_NUM_PER_ORDER*2+1] = {12, 32, 55, 78, 21, 92, 115, 135, 128, 150, 156, 161, 170, 180, 134};/* 3 time */
+	unsigned short lenArray2[DFI_SCAN_NUM_PER_ORDER*2+1] = {12, 42, 47, 221, 36, 52, 61, 72, 128, 1500, 42, 49, 50, 136, 127};/* 4 time */
+	unsigned short lenArray3[DFI_SCAN_NUM_PER_ORDER*2+1] = {12, 42, 47, 221, 36, 52, 61, 72, 128, 1500, 42, 49, 50, 46, 46};/* 0 time */
+	int match_num;
+	int size = 15;
+	unsigned short matched[MAX_MATCHED_NUM]; 
+	if(!acmTCPTree && !acmUDPTree){
+		printf("acsm tree not build!\n");
+		return ;
+	}
+	if(newStack ==NULL || oldStack ==NULL || stateQue ==NULL){
+		printf("acsmAssistInit allocate failed\n");
+		return ;
+	}
+	
+	match_num = acsmSearch (acmTCPTree, lenArray1, size, matched, MAX_MATCHED_NUM);
+	if(match_num > 0){
+		printf("\nmatch %d time\n", match_num);
+	} else {
+		printf("\n no match!\n");
+	}
+
+	match_num = acsmSearch (acmUDPTree, lenArray2, size, matched, MAX_MATCHED_NUM);
+	if(match_num > 0){
+		printf("\nmatch %d time\n", match_num);
+	} else {
+		printf("\n no match!\n");
+	}
+
+	match_num = acsmSearch (acmTCPTree, lenArray3, size, matched, MAX_MATCHED_NUM);
+	if(match_num > 0){
+		printf("\nmatch %d time\n", match_num);
+	} else {
+		printf("\n no match!\n");
+	}
+	match_num = acsmSearch (acmUDPTree, lenArray3, size, matched, MAX_MATCHED_NUM);
+	if(match_num > 0){
+		printf("\nmatch %d time\n", match_num);
+	} else {
+		printf("\n no match!\n");
+	}
+}
+
+ushort rangePattern1[45][2] = {{40,43},{47,49},{220,222},{50,54},{60,64},{1500,1500},{40,43},{49,54},{127,129},
+							   {40,43},{47,49},{220,222},{50,54},{60,64},{1500,1500},{40,43},{49,54},{136,138},
+							   {40,43},{20,23},{220,222},{50,54},{60,64},{1500,1500},{40,43},{49,54},{134,134},
+							   {10,20},{30,40},{50,60},{70,80},{90,100},{110,120},{130,140},{150,160},{170,180},
+							   {10,20},{30,40},{50,60},{70,80},{90,100},{110,120},{130,140},{155,175},{180,190}
+							  };
+typedef ushort (*RANGE)[2];
+int acsmTreeInit(ACSM_STRUCT ** acsmTree, ushort (*rangePatterns)[2], int psNum)
+{
+	int i, j;
+	int ret = 0;
+	ushort areaIndex = 0;
+	ushort *indexArrays, *nums, *Array, *patterns, *lenMapTable;
+	ushort patternNum, prefixNum;
+	ushort (*rangePattern)[2];
+	PATTERN_STRUCT* mapPatterns;
+	ACSM_STRUCT * tree = NULL;
+
+	tree = (ACSM_STRUCT *) kzalloc(sizeof(ACSM_STRUCT), MOD_DFI);
+	*acsmTree = tree;
+	if(tree == NULL){
+		ret = 1;
+		goto err;
+	}
+	lenMapTable = (ushort *) kzalloc(MAX_PAYLOAD_LENGTH * sizeof(ushort), MOD_DFI);
+	if(lenMapTable == NULL){
+		ret = 2;
+		goto err;
+	}
+	tree->acsmMapTable = lenMapTable;
+	mapPatterns = (PATTERN_STRUCT*)kzalloc(sizeof(PATTERN_STRUCT)*psNum, MOD_DFI);
+	if(mapPatterns == NULL){
+		ret = 3;
+		goto err;
+	}
+
+	if(rangeInit(MAX_PAYLOAD_LENGTH) != 0){
+		ret = 4;
+		goto err;
+	}
+	
+	for(j = 0; j < psNum; j++){
+		rangePattern = (RANGE)(rangePatterns[9*j]);
+		/*get the min area*/
+		for(i = 0; i < 9; i++){
+			setRange(lenMapTable, rangePattern[i]);
 		}
-		if(currentNode->flag == 0xab){
-			printf("Matched %d\n", currentNode->id);
+		mapPatterns[j].matchNum = 9;
+	}
+	areaIndex = buildArea(lenMapTable);
+	tree->acsmMapSize = areaIndex + 1;
+#if 0
+	printf("\nArea num %d\n", areaIndex);
+	for(i = 0; i < MAX_PAYLOAD_LENGTH; i++){
+		if(i%10 == 0)
+			printf("\n");
+		printf("%d  ", lenMapTable[i]);
+	}
+#endif
+	for(i = 0; i < psNum; i++){
+		mapPatterns[i].indexArray = indexArrays = (ushort*)kmalloc
+			(areaIndex * sizeof(ushort) * mapPatterns[i].matchNum, MOD_DFI);
+		mapPatterns[i].areaNum = nums = (ushort*)kmalloc
+			(sizeof(ushort) *mapPatterns[i].matchNum, MOD_DFI);
+		if(indexArrays == NULL || nums == NULL){
+			ret = 5;
+			goto err;
 		}
+		Array = indexArrays;
+		rangePattern = (RANGE)(rangePatterns[i*9]);
+		for(j = 0; j < 9; j++){
+			nums[j] = range2Areas(lenMapTable, rangePattern[j], Array);
+			Array += nums[j];
+		}
+		j = 0;
+		mapPatterns[i].combineNum = 1;
+		patternNum = 1;
+		while(j < mapPatterns[i].matchNum && nums[j] == 1){
+			mapPatterns[i].combineNum *= nums[j];
+			j++;
+		}
+		prefixNum = j;
+		for( ; j < mapPatterns[i].matchNum; j++){
+			mapPatterns[i].combineNum *= nums[j];
+			patternNum *= nums[j];
+		}
+		tree->acsmMaxStates += prefixNum + patternNum*(mapPatterns[i].matchNum - prefixNum);
+		patternNum = mapPatterns[i].combineNum;
+		mapPatterns[i].patterns = patterns = (ushort*)kmalloc(
+				(mapPatterns[i].matchNum) * patternNum * sizeof(ushort), MOD_DFI);
+		if(patterns == NULL){
+			ret = 6;
+			goto err;
+		}
+		getPatterns(indexArrays, nums, mapPatterns[i].matchNum, patterns);
+		tree->acsmPatternNum += patternNum;
+	}
+
+	ret = acsmCompile(tree, mapPatterns, psNum);
+
+err:
+	rangeDestroy();
+	
+	if(mapPatterns != NULL){
+		for(i = 0; i < psNum; i++){
+			if(mapPatterns[i].indexArray != NULL){
+				kfree(mapPatterns[i].indexArray);
+			}
+			if(mapPatterns[i].areaNum != NULL){
+				kfree(mapPatterns[i].areaNum);
+			}
+			if(mapPatterns[i].patterns != NULL){
+				kfree(mapPatterns[i].patterns);
+			}
+		}
+		free(mapPatterns);
+	}
+	if(ret != 0){
+		acsmTreeFree(tree);
+		*acsmTree = NULL;
+	}
+	return ret;
+}
+
+int acsm_init()
+{
+	if(acsmTreeInit(&acmUDPTree, rangePattern1, 3) != 0){
+		return 1;
+	}
+	if(acsmTreeInit(&acmTCPTree, rangePattern1+3*9, 2) != 0){
+		return 2;
 	}
 	return 0;
-
 }
